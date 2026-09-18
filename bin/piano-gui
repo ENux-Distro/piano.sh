@@ -1,0 +1,4 @@
+#!/bin/sh
+# Launch the Piano GUI (libadwaita front end for the hidden Carla + sfizz piano)
+ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m piano "$@"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Piano
+Comment=Play the Salamander Grand Piano and record MIDI
+Exec=/home/emir/piano.sh/bin/piano-gui
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+StartupNotify=true

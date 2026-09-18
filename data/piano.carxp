@@ -1,0 +1,159 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE CARLA-PROJECT>
+<CARLA-PROJECT VERSION='2.5'>
+ <EngineSettings>
+  <ForceStereo>false</ForceStereo>
+  <PreferPluginBridges>false</PreferPluginBridges>
+  <PreferUiBridges>true</PreferUiBridges>
+  <UIsAlwaysOnTop>false</UIsAlwaysOnTop>
+  <MaxParameters>200</MaxParameters>
+  <UIBridgesTimeout>4000</UIBridgesTimeout>
+ </EngineSettings>
+
+ <Transport>
+  <BeatsPerMinute>120</BeatsPerMinute>
+ </Transport>
+
+ <!-- SalamanderGrandPianoV2 (sfizz) -->
+ <Plugin>
+  <Info>
+   <Type>LV2</Type>
+   <Name>SalamanderGrandPianoV2</Name>
+   <URI>http://sfztools.github.io/sfizz</URI>
+  </Info>
+
+  <Data>
+   <Active>Yes</Active>
+   <ControlChannel>1</ControlChannel>
+   <Options>0x1f0</Options>
+
+   <Parameter>
+    <Index>0</Index>
+    <Name>Volume</Name>
+    <Symbol>volume</Symbol>
+    <Value>-4</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>1</Index>
+    <Name>Polyphony</Name>
+    <Symbol>num_voices</Symbol>
+    <Value>256</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>2</Index>
+    <Name>Oversampling factor</Name>
+    <Symbol>oversampling</Symbol>
+    <Value>1</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>3</Index>
+    <Name>Preload size</Name>
+    <Symbol>preload_size</Symbol>
+    <Value>32768</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>5</Index>
+    <Name>Scala root key</Name>
+    <Symbol>scala_root_key</Symbol>
+    <Value>60</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>6</Index>
+    <Name>Tuning frequency</Name>
+    <Symbol>tuning_frequency</Symbol>
+    <Value>440</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>7</Index>
+    <Name>Stretched tuning</Name>
+    <Symbol>stretched_tuning</Symbol>
+    <Value>0</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>8</Index>
+    <Name>Sample quality</Name>
+    <Symbol>sample_quality</Symbol>
+    <Value>2</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>9</Index>
+    <Name>Oscillator quality</Name>
+    <Symbol>oscillator_quality</Symbol>
+    <Value>1</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>16</Index>
+    <Name>Freewheeling Sample quality</Name>
+    <Symbol>freewheeling_sample_quality</Symbol>
+    <Value>10</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>17</Index>
+    <Name>Freewheeling Oscillator quality</Name>
+    <Symbol>freewheeling_oscillator_quality</Symbol>
+    <Value>3</Value>
+   </Parameter>
+
+   <Parameter>
+    <Index>18</Index>
+    <Name>Sustain cancels release</Name>
+    <Symbol>sustain_cancels_release</Symbol>
+    <Value>0</Value>
+   </Parameter>
+
+   <CustomData>
+    <Type>http://lv2plug.in/ns/ext/atom#Path</Type>
+    <Key>http://sfztools.github.io/sfizz:sfzfile</Key>
+    <Value>/home/emir/SalamanderGrandPianoV2_48khz24bit/SalamanderGrandPianoV2.sfz</Value>
+   </CustomData>
+
+   <CustomData>
+    <Type>http://lv2plug.in/ns/ext/atom#Float</Type>
+    <Key>http://sfztools.github.io/sfizz#cc007</Key>
+    <Value>JpNJPw==</Value>
+   </CustomData>
+
+   <CustomData>
+    <Type>http://lv2plug.in/ns/ext/atom#Float</Type>
+    <Key>http://sfztools.github.io/sfizz#cc010</Key>
+    <Value>AAAAPw==</Value>
+   </CustomData>
+
+   <CustomData>
+    <Type>http://lv2plug.in/ns/ext/atom#Float</Type>
+    <Key>http://sfztools.github.io/sfizz#cc011</Key>
+    <Value>AACAPw==</Value>
+   </CustomData>
+  </Data>
+ </Plugin>
+
+ <ExternalPatchbay>
+  <Connection>
+   <Source>SalamanderGrandPianoV2:Left Output</Source>
+   <Target>alsa_output.pci-0000_00_1f.3.analog-stereo:playback_FL</Target>
+  </Connection>
+  <Connection>
+   <Source>SalamanderGrandPianoV2:Right Output</Source>
+   <Target>alsa_output.pci-0000_00_1f.3.analog-stereo:playback_FR</Target>
+  </Connection>
+  <Connection>
+   <Source>Midi-Bridge:USB func for MIDI: MIDI OUT 1 (capture)</Source>
+   <Target>SalamanderGrandPianoV2:events-in</Target>
+  </Connection>
+  <Positions>
+   <Position x1="1299" y1="1165" pluginId="0">
+    <Name>SalamanderGrandPianoV2</Name>
+   </Position>
+  </Positions>
+ </ExternalPatchbay>
+</CARLA-PROJECT>

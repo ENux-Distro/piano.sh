@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Old in-repo recordings (the app now records to ~/.local/share/piano/recordings)
+/recordings/
+
+# Sample symlinks Carla creates next to a saved project
+/data/Carla/
