@@ -172,10 +172,6 @@ This project is intentionally simple and focused on a single use case: making di
 
 The codebase balances a thin shell entrypoint with a Python backend and GUI so the audio plumbing is easier to reason about and maintain.
 
-## License
-
-This project does not currently declare a license in the repository metadata. If you plan to redistribute or modify it, please check the repository and add an appropriate license before publishing.
-
 ## Credits
 
 - Carla
