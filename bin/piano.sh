@@ -3,7 +3,7 @@
 ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
 PROJECT_FILE="$ROOT/data/piano.carxp"
 # Same place as the GUI
-RECORDINGS="${XDG_DATA_HOME:-$HOME/.local/share}/piano/recordings"
+RECORDINGS="${XDG_DATA_HOME:-$HOME/.local/share}/piano/recordings/midi"
 
 # Carla/sfizz node and port names (see piano.carxp)
 NODE="SalamanderGrandPianoV2"

@@ -50,7 +50,9 @@ class PianoWindow(Adw.ApplicationWindow):
         super().__init__(application=app, title="Piano", default_width=460, default_height=640)
         self.cfg = be.load_config()
         self.engine = be.Engine()
+        be.organize_recordings()
         self.recorder = be.Recorder()
+        self.mp3 = be.Mp3Recorder()
         self.engine_state = "stopped"          # stopped | starting | running | stopping
         self.state = {}                        # last graph state from the tick worker
         self._tick_busy = False
@@ -69,6 +71,10 @@ class PianoWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Change Instrument…", "win.change-sfz")
         menu.append("Change MIDI Device…", "win.change-midi")
+        src_menu = Gio.Menu()
+        src_menu.append("Salamander piano (this app)", "win.mp3-source::engine")
+        src_menu.append("Audio input (line-in / mic)", "win.mp3-source::input")
+        menu.append_submenu("MP3 Source", src_menu)
         menu.append("Open Recordings Folder", "win.open-recordings")
         menu.append("About Piano", "win.about")
         self.menu_button.set_menu_model(menu)
@@ -84,6 +90,11 @@ class PianoWindow(Adw.ApplicationWindow):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
+
+        src = Gio.SimpleAction.new_stateful("mp3-source", GLib.VariantType.new("s"),
+                                            GLib.Variant.new_string(self._mp3_source()))
+        src.connect("activate", self._on_mp3_source)
+        self.add_action(src)
 
         self._build_missing_page()
         self._build_welcome_page()
@@ -265,7 +276,9 @@ class PianoWindow(Adw.ApplicationWindow):
         self.start_btn.connect("clicked", self._on_start_clicked)
         self.record_btn = _pill("Record MIDI", "media-record-symbolic")
         self.record_btn.connect("clicked", self._on_record_clicked)
-        for b in (self.start_btn, self.record_btn):
+        self.mp3_btn = _pill("Record MP3", "audio-x-generic-symbolic")
+        self.mp3_btn.connect("clicked", self._on_mp3_clicked)
+        for b in (self.start_btn, self.record_btn, self.mp3_btn):
             b.set_size_request(240, -1)
             actions.append(b)
         box.append(actions)
@@ -320,7 +333,7 @@ class PianoWindow(Adw.ApplicationWindow):
         else:
             self.out_row.set_subtitle("Detecting…")
         try:
-            n = sum(1 for _ in be.RECORDINGS_DIR.glob("*.mid"))
+            n = be.count_recordings()
         except OSError:
             n = 0
         self.rec_row.set_subtitle(f"{n} recording{'s' if n != 1 else ''}")
@@ -334,7 +347,7 @@ class PianoWindow(Adw.ApplicationWindow):
             _set_pill(self.start_btn, "Stop Piano", "media-playback-stop-symbolic",
                       add=("destructive-action",), remove=("suggested-action",))
 
-        if self.recorder.running:
+        if self.recorder.running or self.mp3.running:
             self._update_record_timer()          # the timer owns the status line while recording
         elif st == "running":
             where = self.state.get("sink") or "your audio output"
@@ -355,6 +368,19 @@ class PianoWindow(Adw.ApplicationWindow):
             can = bool(midi and midi.alsa_addr)
             self.record_btn.set_sensitive(can)
             self.record_btn.set_tooltip_text(None if can else "Connect your piano to record")
+            self.record_btn.set_sensitive(can and not self.mp3.running)
+
+        if self.mp3.running:
+            _set_pill(self.mp3_btn, "Stop MP3", "media-playback-stop-symbolic", add=("destructive-action",))
+            self.mp3_btn.set_sensitive(True)
+            self.record_btn.set_sensitive(False)
+        else:
+            _set_pill(self.mp3_btn, "Record MP3", "audio-x-generic-symbolic", remove=("destructive-action",))
+            ready = self._mp3_source() == "input" or st == "running"
+            self.mp3_btn.set_sensitive(ready and not self.recorder.running)
+            self.mp3_btn.set_tooltip_text(None if ready else "Start the piano to record")
+        if self.recorder.running:
+            self.mp3_btn.set_sensitive(False)
 
     # ------------------------------------------------------------------ periodic graph scan
 
@@ -413,6 +439,12 @@ class PianoWindow(Adw.ApplicationWindow):
         if self.recorder.proc is not None and not self.recorder.running:
             err = self.recorder.error()
             saved = self.recorder.stop()
+            self._error("Recording stopped.", (err + "\n" if err else "") +
+                        (f"Saved what was recorded to {saved.name}." if saved else "Nothing was saved."))
+
+        if self.mp3.proc is not None and not self.mp3.running:
+            err = self.mp3.error()
+            saved = self.mp3.stop()
             self._error("Recording stopped.", (err + "\n" if err else "") +
                         (f"Saved what was recorded to {saved.name}." if saved else "Nothing was saved."))
 
@@ -479,11 +511,43 @@ class PianoWindow(Adw.ApplicationWindow):
             return
         self._refresh_main()
 
+    def _mp3_source(self):
+        return "input" if self.cfg.get("mp3_source") == "input" else "engine"
+
+    def _on_mp3_source(self, action, value):
+        if self.mp3.running:
+            return
+        action.set_state(value)
+        self.cfg["mp3_source"] = value.get_string()
+        be.save_config(self.cfg)
+        self._refresh_main()
+        if value.get_string() == "input":
+            self.toasts.add_toast(Adw.Toast(title="MP3 will record your computer's audio input"))
+
+    def _on_mp3_clicked(self, *_):
+        if self.mp3.running:
+            saved = self.mp3.stop()
+            self._refresh_main()
+            if saved:
+                toast = Adw.Toast(title=f"Saved {saved.name}", button_label="Show", timeout=6)
+                toast.connect("button-clicked", lambda *_: self._open_recordings())
+                self.toasts.add_toast(toast)
+            else:
+                self.toasts.add_toast(Adw.Toast(title="Nothing was recorded"))
+            return
+        try:
+            self.mp3.start(self._mp3_source())
+        except OSError as e:
+            self._error("Couldn't start recording.", str(e))
+            return
+        self._refresh_main()
+
     def _update_record_timer(self):
         if self._closing:
             return False
-        if self.recorder.running:
-            secs = int(time.monotonic() - self.recorder.started_at)
+        rec = self.mp3 if self.mp3.running else self.recorder
+        if rec.running:
+            secs = int(time.monotonic() - rec.started_at)
             self.status_label.set_label(f"● Recording  {secs // 60:02d}:{secs % 60:02d}")
         return True
 
@@ -547,7 +611,7 @@ class PianoWindow(Adw.ApplicationWindow):
     def _on_close_request(self, *_):
         if self._closing:
             return False
-        if self.recorder.running:
+        if self.recorder.running or self.mp3.running:
             dialog = Adw.AlertDialog(heading="Stop Recording?",
                                      body="A recording is in progress. It will be saved before Piano quits.")
             dialog.add_response("cancel", "Cancel")
@@ -566,6 +630,7 @@ class PianoWindow(Adw.ApplicationWindow):
         self._closing = True
         self.set_visible(False)
         self.recorder.stop()
+        self.mp3.stop()
         self.engine.stop()
         self.get_application().quit()
 
@@ -591,6 +656,7 @@ class PianoApp(Adw.Application):
         # never leave an invisible Carla running behind
         if self.window:
             self.window.recorder.stop()
+            self.window.mp3.stop()
             self.window.engine.stop()
 
 

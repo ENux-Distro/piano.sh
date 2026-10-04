@@ -32,6 +32,8 @@ ENGINE_DIR = _engine
 PROJECT_FILE = ENGINE_DIR / "piano.carxp"
 ENGINE_LOG = ENGINE_DIR / "carla.log"
 RECORDINGS_DIR = _data / "recordings"
+MIDI_DIR = RECORDINGS_DIR / "midi"
+MP3_DIR = RECORDINGS_DIR / "mp3"
 
 CARLA_APP = "studio.kx.carla"
 SFIZZ_EXTENSION = "org.freedesktop.LinuxAudio.Plugins.sfizz"
@@ -98,7 +100,8 @@ def check_prerequisites():
         if not ok:
             problems.append(("The sfizz plugin for Carla is not installed.",
                              f"flatpak install --user flathub {SFIZZ_EXTENSION}//{branch}"))
-    for tool, pkg in (("pw-link", "pipewire-bin"), ("pw-dump", "pipewire-bin"), ("arecordmidi", "alsa-utils")):
+    for tool, pkg in (("pw-link", "pipewire-bin"), ("pw-dump", "pipewire-bin"), ("arecordmidi", "alsa-utils"),
+                      ("pw-record", "pipewire-bin"), ("ffmpeg", "ffmpeg")):
         if not shutil.which(tool):
             problems.append((f"'{tool}' is missing.", f"sudo apt install {pkg}"))
     return problems
@@ -226,9 +229,9 @@ def sync_links(graph, midi_alias):
     sink = graph.sink_ports()
     if sink:
         for out, dst in ((eng["Left Output"], sink[0]), (eng["Right Output"], sink[1])):
-            # drop links to other sinks (e.g. after the default device changed)
+            # drop links to other sinks (e.g. after the default device changed), but keep the MP3 recorder's
             for (o, i) in graph.links:
-                if o == out and i != dst:
+                if o == out and i != dst and not graph.full_name(i).startswith(Mp3Recorder.NODE + ":"):
                     _pw_link("-d", graph.full_name(o), graph.full_name(i))
             if (out, dst) not in graph.links:
                 _pw_link(graph.full_name(out), graph.full_name(dst))
@@ -285,6 +288,10 @@ SFIZZ_PARAMS = [
 ]
 
 
+PEDAL_FADE = " off_mode=time off_time=0.25"
+RELEASE_POLYPHONY = 16     # voices per release-resonance layer
+
+
 class Engine:
     """Carla running headless (--no-gui): no windows, no taskbar entry, nothing on any workspace."""
 
@@ -296,7 +303,40 @@ class Engine:
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
+    def _tune_instrument(self, sfz):
+        """Path of a copy of the SFZ with fixes for fast, pedalled playing. Falls back to the original file
+        if it isn't Salamander-shaped.
+
+        * Release resonance: lifting the pedal releases every held note at once, and each one starts a
+          release-resonance voice. In a fast piece that is hundreds of voices, over the 256 limit, so
+          sfizz stole the voices of the notes that were still fading and the whole sound dropped out
+          for ~50 ms (a thunk, then missing notes). Cap those layers per group.
+        * Pedal noise: the Kawai sends the pedal as a continuous CC64 ramp (e.g. 127 -> 0 in ~20 ms) and
+          the SFZ fires a thunk on *every* CC64 event in range, so one lift fired a burst that choked
+          itself. Fire once, when the pedal reaches the bottom (127) or the top (0), and fade the choke.
+        """
+        try:
+            src = Path(sfz)
+            text = src.read_text(errors="replace")
+            orig = text
+            text = text.replace("trigger=release", f"trigger=release polyphony={RELEASE_POLYPHONY}")
+            down = "<group> group=1 hikey=-1 lokey=-1 on_locc64=64 on_hicc64=127 off_by=2 volume=-24"
+            up = "<group> hikey=-1 lokey=-1 on_locc64=0 on_hicc64=63 group=2 volume=-23"
+            if down in text and up in text:
+                text = text.replace(down, down.replace("volume=-24", "volume=-27")
+                                    .replace("on_locc64=64 on_hicc64=127", "on_locc64=127 on_hicc64=127") + PEDAL_FADE)
+                text = text.replace(up, up.replace("volume=-23", "volume=-26")
+                                    .replace("on_locc64=0 on_hicc64=63", "on_locc64=0 on_hicc64=0") + PEDAL_FADE)
+            if text == orig:
+                return src
+            out = ENGINE_DIR / "instrument.sfz"
+            out.write_text(f"<control> default_path={src.resolve().parent}/\n\n{text}")
+            return out
+        except OSError:
+            return Path(sfz)
+
     def write_project(self, sfz):
+        sfz = self._tune_instrument(sfz)
         params = "\n".join(
             f"   <Parameter>\n    <Index>{i}</Index>\n    <Name>{n}</Name>\n"
             f"    <Symbol>{s}</Symbol>\n    <Value>{v}</Value>\n   </Parameter>\n"
@@ -374,6 +414,24 @@ class Engine:
         return "\n".join(keep[-lines:])
 
 
+# --------------------------------------------------------------------------- recordings
+
+def organize_recordings():
+    """Move loose recordings from the top of the recordings folder into midi/ and mp3/."""
+    for pattern, dest in (("*.mid", MIDI_DIR), ("*.mp3", MP3_DIR)):
+        for f in RECORDINGS_DIR.glob(pattern):
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                if not (dest / f.name).exists():
+                    f.rename(dest / f.name)
+            except OSError:
+                pass
+
+
+def count_recordings():
+    return (len(list(MIDI_DIR.glob("*.mid"))) + len(list(MP3_DIR.glob("*.mp3")))) if RECORDINGS_DIR.exists() else 0
+
+
 # --------------------------------------------------------------------------- MIDI recorder
 
 class Recorder:
@@ -387,8 +445,8 @@ class Recorder:
         return self.proc is not None and self.proc.poll() is None
 
     def start(self, alsa_addr):
-        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-        self.path = RECORDINGS_DIR / f"piano-{time.strftime('%Y-%m-%d_%H-%M-%S')}.mid"
+        MIDI_DIR.mkdir(parents=True, exist_ok=True)
+        self.path = MIDI_DIR / f"piano-{time.strftime('%Y-%m-%d_%H-%M-%S')}.mid"
         self.proc = subprocess.Popen(["arecordmidi", "-p", alsa_addr, str(self.path)],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                      stdin=subprocess.DEVNULL, text=True)
@@ -412,6 +470,92 @@ class Recorder:
 
     def error(self):
         """stderr of a recorder that died on its own."""
+        if self.proc and self.proc.poll() is not None:
+            return (self.proc.stderr.read() or "").strip()
+        return ""
+
+
+# --------------------------------------------------------------------------- MP3 recorder
+
+class Mp3Recorder:
+    """Records the piano engine's own output (not other apps) with pw-record, then encodes to MP3."""
+    NODE = "PianoRecorder"
+
+    def __init__(self):
+        self.proc = None
+        self.path = None
+        self.wav = None
+        self.started_at = 0.0
+
+    @property
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, source="engine"):
+        """source "engine": the Salamander piano. "input": the computer's default audio input
+        (line-in/mic), e.g. the digital piano's own sound through its headphone/line-out jack."""
+        graph = Graph.snapshot()
+        eng = graph.engine_ports()
+        if source == "engine" and not {"Left Output", "Right Output"} <= eng.keys():
+            raise OSError("The piano engine isn't running yet.")
+        MP3_DIR.mkdir(parents=True, exist_ok=True)
+        stem = MP3_DIR / f"piano-{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        self.path, self.wav = stem.with_suffix(".mp3"), stem.with_suffix(".wav")
+        self.proc = subprocess.Popen(
+            ["pw-record", "--rate", "48000", "--channels", "2", "--format", "s16",
+             "-P", f"{{ node.name={self.NODE} node.autoconnect={'false' if source == 'engine' else 'true'} }}",
+             str(self.wav)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True)
+        self.started_at = time.monotonic()
+        if source == "input":
+            return self.path
+        try:
+            for _ in range(50):                       # wait for our input ports to show up
+                if self.proc.poll() is not None:
+                    raise OSError(self.error() or "pw-record exited.")
+                g = Graph.snapshot()
+                ports = {p.get("port.name"): pid for pid, p in g.ports.items()
+                         if g.nodes.get(p.get("node.id"), {}).get("node.name") == self.NODE
+                         and p.get("port.direction") == "in"}
+                if {"input_FL", "input_FR"} <= ports.keys():
+                    break
+                time.sleep(0.1)
+            else:
+                raise OSError("Couldn't set up the recorder.")
+            if not (_pw_link(graph.full_name(eng["Left Output"]), f"{self.NODE}:input_FL")
+                    and _pw_link(graph.full_name(eng["Right Output"]), f"{self.NODE}:input_FR")):
+                raise OSError("Couldn't connect the recorder to the piano engine.")
+        except OSError:
+            self.stop()
+            raise
+        return self.path
+
+    def stop(self):
+        """Stop, encode to MP3, delete the temporary WAV. Returns the saved path or None."""
+        if self.proc is None:
+            return None
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGINT)     # pw-record finalizes the WAV on SIGINT
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        self.proc = None
+        path, wav, self.path, self.wav = self.path, self.wav, None, None
+        if not (wav and wav.exists() and wav.stat().st_size > 44):
+            wav and wav.unlink(missing_ok=True)
+            return None
+        ok = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav),
+                             "-codec:a", "libmp3lame", "-q:a", "0", str(path)],
+                            stdin=subprocess.DEVNULL).returncode == 0
+        if ok:
+            wav.unlink(missing_ok=True)
+            return path
+        path.unlink(missing_ok=True)
+        return wav                                   # keep the raw recording rather than lose it
+
+    def error(self):
         if self.proc and self.proc.poll() is not None:
             return (self.proc.stderr.read() or "").strip()
         return ""
