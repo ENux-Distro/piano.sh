@@ -30,7 +30,7 @@ The project does three main jobs:
 
 1. Detects your digital piano's MIDI output on PipeWire/ALSA
 2. Starts Carla with a generated sfizz project and a selected `.sfz` instrument
-3. Wires MIDI into the piano engine and audio out to your default sink
+3. Wires MIDI into the piano engine and audio out to the output you pick (or your default sink)
 
 The result is a simple “make my MIDI keyboard sound like a real piano” workflow.
 
@@ -91,7 +91,7 @@ The GUI will help you:
 - choose an `.sfz` piano file,
 - start the hidden engine,
 - connect the MIDI interface,
-- route sound to the default sink,
+- route sound to the chosen output,
 - record MIDI if needed.
 
 You can also run the underlying shell script directly:

@@ -44,6 +44,14 @@ LATENCY = "256/48000"          # 256 samples @ 48 kHz, ~5.3 ms
 
 # --------------------------------------------------------------------------- config
 
+VOLUME_MIN, VOLUME_MAX = 0, 30
+
+
+def default_volume(sfz):
+    """Starting makeup gain (dB) for an instrument; Ivy Audio's Piano in 162 is mixed very quietly."""
+    return 12 if "ivyaudio" in Path(sfz).name.lower() else 0
+
+
 def load_config():
     try:
         return json.loads(CONFIG_FILE.read_text())
@@ -188,11 +196,18 @@ class Graph:
         return res
 
     # -- output device
-    def sink_ports(self):
-        """(FL id, FR id) of the default audio sink, falling back to the first sink."""
+    def sinks(self):
+        """[(node.name, label)] of every audio output, including virtual ones like AudioRelay's."""
+        found = [(str(n.get("node.name")), str(n.get("node.description") or n.get("node.name")))
+                 for n in self.nodes.values() if n.get("media.class") == "Audio/Sink"]
+        return sorted(found, key=lambda s: s[1].lower())
+
+    def sink_ports(self, output=None):
+        """(FL id, FR id) of the chosen sink (a node.name); if it's unset or gone, the default sink,
+        falling back to the first sink."""
         sinks = [nid for nid, n in self.nodes.items() if n.get("media.class") == "Audio/Sink"]
-        target = next((nid for nid in sinks if self.nodes[nid].get("node.name") == self.default_sink),
-                      sinks[0] if sinks else None)
+        by_name = lambda name: next((nid for nid in sinks if self.nodes[nid].get("node.name") == name), None)
+        target = by_name(output) or by_name(self.default_sink) or (sinks[0] if sinks else None)
         if target is None:
             return None
         chans = {p.get("audio.channel"): pid for pid, p in self.ports.items()
@@ -200,8 +215,8 @@ class Graph:
         fl, fr = chans.get("FL") or chans.get("MONO"), chans.get("FR") or chans.get("MONO")
         return (fl, fr) if fl and fr else None
 
-    def sink_label(self):
-        ports = self.sink_ports()
+    def sink_label(self, output=None):
+        ports = self.sink_ports(output)
         if not ports:
             return None
         n = self.nodes.get(self.ports[ports[0]].get("node.id"), {})
@@ -212,9 +227,9 @@ def _pw_link(*args):
     return subprocess.run(["pw-link", *args], capture_output=True, text=True, timeout=5).returncode == 0
 
 
-def sync_links(graph, midi_alias):
-    """Make sure MIDI -> engine -> default sink is wired. Returns a dict describing the state."""
-    state = {"engine_ready": False, "midi": graph.find_midi(midi_alias), "sink": graph.sink_label()}
+def sync_links(graph, midi_alias, output=None):
+    """Make sure MIDI -> engine -> chosen sink is wired. Returns a dict describing the state."""
+    state = {"engine_ready": False, "midi": graph.find_midi(midi_alias), "sink": graph.sink_label(output)}
     eng = graph.engine_ports()
     if not {"Left Output", "Right Output", "events-in"} <= eng.keys():
         return state
@@ -226,7 +241,7 @@ def sync_links(graph, midi_alias):
         if (src, eng["events-in"]) not in graph.links:
             _pw_link(midi.name, graph.full_name(eng["events-in"]))
 
-    sink = graph.sink_ports()
+    sink = graph.sink_ports(output)
     if sink:
         for out, dst in ((eng["Left Output"], sink[0]), (eng["Right Output"], sink[1])):
             # drop links to other sinks (e.g. after the default device changed), but keep the MP3 recorder's
@@ -303,7 +318,7 @@ class Engine:
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def _tune_instrument(self, sfz):
+    def _tune_instrument(self, sfz, gain=0):
         """Path of a copy of the SFZ with fixes for fast, pedalled playing. Falls back to the original file
         if it isn't Salamander-shaped.
 
@@ -327,6 +342,21 @@ class Engine:
                                     .replace("on_locc64=64 on_hicc64=127", "on_locc64=127 on_hicc64=127") + PEDAL_FADE)
                 text = text.replace(up, up.replace("volume=-23", "volume=-26")
                                     .replace("on_locc64=0 on_hicc64=63", "on_locc64=0 on_hicc64=0") + PEDAL_FADE)
+            # Quiet libraries (e.g. Ivy Audio Piano in 162 mixes its forte layer at -12 dB, so it peaks
+            # around -21 dBFS here): add makeup gain. global_volume stacks with region volume= instead
+            # of being overridden by it. Backslash sample paths are normalized for Linux.
+            # The volume slider sets the makeup gain for every instrument.
+            veltrack = " amp_veltrack=85" if "ivyaudio" in src.name.lower() else ""
+            opcodes = f" global_volume={gain:g}{veltrack}"
+            text = text.replace("\\", "/")
+            # We play a copy from ENGINE_DIR, so a relative default_path in the file (e.g. "../Samples/")
+            # would resolve against the wrong folder: anchor it to the original SFZ's folder.
+            text = re.sub(r"default_path=(?!/)(.*)",
+                          lambda m: f"default_path={(src.resolve().parent / m.group(1).strip()).resolve()}/", text)
+            if "<global>" in text:      # a second <global> would reset ours, so join the file's own
+                text = text.replace("<global>", "<global>" + opcodes, 1)
+            else:
+                text = f"<global>{opcodes}\n\n{text}"
             if text == orig:
                 return src
             out = ENGINE_DIR / "instrument.sfz"
@@ -335,8 +365,8 @@ class Engine:
         except OSError:
             return Path(sfz)
 
-    def write_project(self, sfz):
-        sfz = self._tune_instrument(sfz)
+    def write_project(self, sfz, gain=0):
+        sfz = self._tune_instrument(sfz, gain)
         params = "\n".join(
             f"   <Parameter>\n    <Index>{i}</Index>\n    <Name>{n}</Name>\n"
             f"    <Symbol>{s}</Symbol>\n    <Value>{v}</Value>\n   </Parameter>\n"
@@ -349,11 +379,11 @@ class Engine:
         for d in ENGINE_DIR.glob("Carla_*"):
             shutil.rmtree(d, ignore_errors=True)
 
-    def start(self, sfz):
+    def start(self, sfz, gain=0):
         if self.running:
             return
         self._cleanup()
-        self.write_project(sfz)
+        self.write_project(sfz, gain)
         cmd = ["flatpak", "run", f"--env=PIPEWIRE_LATENCY={LATENCY}"]
         home = Path.home().resolve()
         for d in {Path(sfz).resolve().parent, ENGINE_DIR.resolve()}:

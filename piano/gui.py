@@ -298,13 +298,27 @@ class PianoWindow(Adw.ApplicationWindow):
         self.midi_row.set_activatable(True)
         self.midi_row.connect("activated", self._on_change_midi)
 
-        self.out_row = _row("Audio Output", "", "audio-card-symbolic")
+        self.out_row = Adw.ComboRow(title="Audio Output", use_markup=False,
+                                    expression=Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
+        self.out_row.add_prefix(Gtk.Image(icon_name="audio-card-symbolic"))
+        self._out_names = None                # node.name per combo entry; None entry = system default
+        self._out_syncing = False
+        self.out_row.connect("notify::selected", self._on_output_selected)
+
+        self.vol_row = _row("Volume", "", "audio-volume-high-symbolic")
+        self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, be.VOLUME_MIN, be.VOLUME_MAX, 1)
+        self.vol_scale.set_size_request(160, -1)
+        self.vol_scale.set_valign(Gtk.Align.CENTER)
+        self.vol_scale.set_draw_value(False)
+        self.vol_scale.connect("value-changed", self._on_volume_changed)
+        self.vol_row.add_suffix(self.vol_scale)
+        self._vol_timer = 0
 
         self.rec_row = _row("Recordings", "", "folder-open-symbolic")
         self.rec_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
         self.rec_row.set_activatable(True)
         self.rec_row.connect("activated", lambda *_: self._open_recordings())
-        for r in (self.sfz_row, self.midi_row, self.out_row, self.rec_row):
+        for r in (self.sfz_row, self.vol_row, self.midi_row, self.out_row, self.rec_row):
             group.add(r)
         box.append(group)
 
@@ -318,6 +332,13 @@ class PianoWindow(Adw.ApplicationWindow):
         sfz = self.cfg.get("sfz", "")
         self.sfz_row.set_subtitle(Path(sfz).name if sfz else "Not set")
         self.sfz_row.set_tooltip_text(sfz)
+        if sfz and not self._vol_timer:
+            vol = self._volume()
+            if self.vol_scale.get_value() != vol:
+                self._vol_syncing = True
+                self.vol_scale.set_value(vol)
+                self._vol_syncing = False
+            self.vol_row.set_subtitle(f"+{vol} dB")
 
         midi = self.state.get("midi")
         label = self.cfg.get("midi_label") or "Not set"
@@ -328,10 +349,7 @@ class PianoWindow(Adw.ApplicationWindow):
             self.midi_status.set_label("Connected" if midi else "Not connected")
             self.midi_status.add_css_class("success" if midi else "warning")
 
-        if "sink" in self.state:
-            self.out_row.set_subtitle(self.state["sink"] or "No audio output found")
-        else:
-            self.out_row.set_subtitle("Detecting…")
+        self._sync_outputs()
         try:
             n = be.count_recordings()
         except OSError:
@@ -392,16 +410,17 @@ class PianoWindow(Adw.ApplicationWindow):
             return False
         if not self._tick_busy:
             self._tick_busy = True
-            alias, link = self.cfg.get("midi"), self.engine.running
-            threading.Thread(target=self._tick_worker, args=(alias, link), daemon=True).start()
+            args = self.cfg.get("midi"), self.engine.running, self.cfg.get("output")
+            threading.Thread(target=self._tick_worker, args=args, daemon=True).start()
         return force is False     # keep the periodic timer, don't duplicate it on forced ticks
 
-    def _tick_worker(self, alias, link):
+    def _tick_worker(self, alias, link, output):
         try:
             g = be.Graph.snapshot()
-            state = be.sync_links(g, alias) if link else \
-                {"engine_ready": False, "midi": g.find_midi(alias), "sink": g.sink_label()}
+            state = be.sync_links(g, alias, output) if link else \
+                {"engine_ready": False, "midi": g.find_midi(alias), "sink": g.sink_label(output)}
             state["inputs"] = g.midi_inputs()
+            state["sinks"] = g.sinks()
         except Exception as e:                        # pw-dump missing/hung: report, keep going
             state = {"error": str(e)}
         GLib.idle_add(self._on_tick, state)
@@ -460,7 +479,7 @@ class PianoWindow(Adw.ApplicationWindow):
     def _on_start_clicked(self, *_):
         if self.engine_state == "stopped":
             try:
-                self.engine.start(self.cfg["sfz"])
+                self.engine.start(self.cfg["sfz"], self._volume())
             except OSError as e:
                 self._error("Couldn't start the piano engine.", str(e))
                 return
@@ -469,6 +488,73 @@ class PianoWindow(Adw.ApplicationWindow):
             self._request_tick()
         elif self.engine_state == "running":
             self._stop_engine()
+
+    # ------------------------------------------------------------------ audio output
+
+    def _sync_outputs(self):
+        """Keep the Audio Output list in step with the sinks PipeWire currently has."""
+        if "sinks" not in self.state:
+            self.out_row.set_subtitle("Detecting…")
+            return
+        chosen, sinks = self.cfg.get("output"), self.state["sinks"]
+        entries = [(None, "System Default")] + sinks
+        missing = chosen and chosen not in dict(sinks)
+        if missing:                           # e.g. AudioRelay is closed: keep the choice, it comes back
+            entries.append((chosen, f"{self.cfg.get('output_label') or chosen} (unavailable)"))
+        names = [name for name, _ in entries]
+        self._out_syncing = True
+        if names != self._out_names or missing != self._out_missing:
+            self._out_names, self._out_missing = names, missing
+            self.out_row.set_model(Gtk.StringList.new([label for _, label in entries]))
+        self.out_row.set_selected(names.index(chosen) if chosen in names else 0)
+        self._out_syncing = False
+        self.out_row.set_subtitle(self.state["sink"] or "No audio output found")
+
+    _out_missing = False
+
+    def _on_output_selected(self, row, _pspec):
+        if self._out_syncing or not self._out_names:
+            return
+        index = row.get_selected()
+        if index >= len(self._out_names):
+            return
+        name = self._out_names[index]
+        if name == self.cfg.get("output"):
+            return
+        if name:
+            self.cfg["output"] = name
+            self.cfg["output_label"] = dict(self.state.get("sinks", [])).get(name, name)
+        else:
+            self.cfg.pop("output", None)
+            self.cfg.pop("output_label", None)
+        be.save_config(self.cfg)
+        self._request_tick()                  # relinks straight away, no engine restart needed
+
+    # ------------------------------------------------------------------ volume
+
+    _vol_syncing = False
+
+    def _volume(self):
+        sfz = self.cfg.get("sfz", "")
+        return int(self.cfg.get("volumes", {}).get(sfz, be.default_volume(sfz)))
+
+    def _on_volume_changed(self, scale):
+        if self._vol_syncing:
+            return
+        vol = int(round(scale.get_value()))
+        self.cfg.setdefault("volumes", {})[self.cfg.get("sfz", "")] = vol
+        be.save_config(self.cfg)
+        self.vol_row.set_subtitle(f"+{vol} dB")
+        # sfizz only reads global_volume when it loads the instrument, so reload once the slider settles
+        if self._vol_timer:
+            GLib.source_remove(self._vol_timer)
+        self._vol_timer = GLib.timeout_add(700, self._apply_volume)
+
+    def _apply_volume(self):
+        self._vol_timer = 0
+        if self.engine_state == "running":
+            self._stop_engine(then=self._on_start_clicked)
+        return False
 
     def _stop_engine(self, then=None):
         self.engine_state = "stopping"
